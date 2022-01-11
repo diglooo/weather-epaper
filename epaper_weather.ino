@@ -18,43 +18,48 @@ Libraries to install:
 Electrical connections:
 Waveshare 2.9 inch display 290x128 version 2
 DISPLAY		ESP8266
-BUSY		D1
-RST			D2
-DC			D8
-CS			D3
-CLK			D6 (HW SPI)
-DIN			D7 (HW SPI)
+BUSY		GPIO5	D1		
+RST			GPIO4	D2
+DC			GPIO15	D8
+CS			GPIO0	D3
+CLK			GPIO14	D5 (HSCLK)
+DIN			GPIO13	D7 (HMOSI)
 GND			GND
-VCC			D4 (yes, the epaper display is powered by a pin of the ESP8266)
+VCC			3V3
 
 In order to wake from deep sleep, you must connect D0 to RST on the ESP8266 board.
 */
 
+#include <u8g2_fonts.h>
 #include <Arduino.h>
 #include <SPI.h>
 #include <ESP8266WiFi.h>
-#include <simpleDSTadjust.h>
+//#include <simpleDSTadjust.h>
 #include <GxEPD2_BW.h>
-#include <GxEPD2_3C.h>
+//#include <GxEPD2_3C.h>
 #include <Fonts/FreeSansBold9pt7b.h>
 #include <JsonListener.h>
 #include <OpenWeatherMapCurrent.h>
 #include <OpenWeatherMapForecast.h>
-
+#include <U8g2_for_Adafruit_GFX.h>
 #include "meteocons24pt7b.h"
 #include "settings.h"
 
-#define DISP_PWR_1 D4
+
+#define DISP_PWR_1 D6
+
+//SET ESP INTERNAL ADC TO READ BATTERY VOLTAGE
+ADC_MODE(ADC_VCC);
 
 GxEPD2_BW<GxEPD2_290_T94, GxEPD2_290_T94::HEIGHT> display(GxEPD2_290_T94(/*CS*/ D3, /*DC*/ D8, /*RST*/ D2, /*BUSY*/ D1));
+U8G2_FOR_ADAFRUIT_GFX u8g2Fonts;
+
 OpenWeatherMapCurrentData conditions;
 OpenWeatherMapForecastData forecasts[MAX_FORECASTS];
-simpleDSTadjust dstAdjusted(StartRule, EndRule);
+//simpleDSTadjust dstAdjusted(StartRule, EndRule);
 
-uint32_t dstOffset = 0;
 uint8_t foundForecasts = 0;
-long lastDownloadUpdate = millis();
-String moonAgeImage = "";
+uint16_t VCC = 0;
 
 boolean connectWifi() {
 	if (WiFi.status() == WL_CONNECTED) return true;
@@ -79,120 +84,141 @@ boolean connectWifi() {
 	return true;
 }
 
+
 void setup()
 {
-	Serial.begin(115200);
+	
 }
 
 void loop() 
 {
-	pinMode(DISP_PWR_1, OUTPUT);
-	digitalWrite(DISP_PWR_1, LOW);
+	Serial.begin(115200);
+	if (setenv("TZ", "CET-1CEST-2,M3.5.0/02:00:00,M10.5.0/03:00:00", 1) != 0) Serial.println("setenv error");
+	tzset();
 
+	u8g2Fonts.begin(display); // connect u8g2 procedures to Adafruit GFX
+
+	pinMode(DISP_PWR_1, OUTPUT);
+	digitalWrite(DISP_PWR_1, HIGH);
+
+	delay(100);
+	VCC=ESP.getVcc();
+	Serial.print("Vcc="); Serial.println(VCC);
+	
 	boolean connected = connectWifi();
 	uint8_t dataOk= updateData();
-
-	digitalWrite(DISP_PWR_1, HIGH);
-	delay(100);
 
 	if (connected && dataOk)
 	{
 		display.init();
 		drawAll();
 		display.hibernate();	
-		Serial.println("Going to sleep");
 	}
-	else
-	{
-		display.init();
-		display.setRotation(1);
-		display.setFont(&FreeSansBold9pt7b);
-		display.setTextColor(GxEPD_BLACK);
-
-		display.setFullWindow();
-		display.firstPage();
-		do
-		{
-			display.fillScreen(GxEPD_WHITE);
-			display.setCursor(0, 12);
-			display.print("Qualcosa non funziona :(");
-
-		} while (display.nextPage());
-		display.hibernate();
-	}
-	delay(100);
+	
+	delay(50);
 	digitalWrite(DISP_PWR_1, LOW);
 	ESP.deepSleep(UPDATE_INTERVAL_SECS * 1000000);
-	Serial.println("WAKE!");
 };
 
 void drawAll()
 {
 	display.setRotation(1);
-	display.setFont(&FreeSansBold9pt7b);
+	u8g2Fonts.setForegroundColor(GxEPD_BLACK);
+	u8g2Fonts.setBackgroundColor(GxEPD_WHITE);
 	display.setTextColor(GxEPD_BLACK);
 
 	display.setFullWindow();
 	display.firstPage();
 	do
 	{
-		display.fillScreen(GxEPD_WHITE);
 		drawHeader();
 		drawForecast();
-
 	} while (display.nextPage());
 }
 
 void drawHeader()
 {
-	char *dstAbbrev;
-	char temp[30];
-	time_t now = dstAdjusted.time(&dstAbbrev);
+	char temp[64];
+	time_t now = time(nullptr);
 	struct tm * timeinfo = localtime(&now);
-	String date = ctime(&now);
-	
-	date = date.substring(0, 11) + String(1900 + timeinfo->tm_year);
-	sprintf(temp, "%02d:%02d", timeinfo->tm_hour, timeinfo->tm_min);
+	sprintf(temp, "%02d:%02d %2.0f%c %s", timeinfo->tm_hour, timeinfo->tm_min, conditions.temp, 0xb0, conditions.description.c_str());
 
-	display.setCursor(0, 12);
-	display.print(String(temp));
+	uint8_t wifiSignal = getWifiQuality();
+	uint8_t battLevel = getBatteryLevel(VCC);
 
-	display.setCursor(55, 12);
-	display.drawCircle(77, 2, 2, GxEPD_BLACK);
-	sprintf(temp, "%2.0f C", conditions.temp);
-	display.print(temp);
+	u8g2Fonts.setFont(u8g2_font_helvB12_tf);
+	u8g2Fonts.setCursor(0, 15);
+	u8g2Fonts.print(temp);
 
-	display.setCursor(105, 12);
-	display.print(conditions.description);
+	u8g2Fonts.setCursor(287, 19);
+	u8g2Fonts.setFont(u8g2_font_battery19_tn);
+	u8g2Fonts.print(battLevel);
 
-	display.drawLine(0, 19, 297, 19, GxEPD_BLACK);
+	u8g2Fonts.setCursor(285, 16);
+	u8g2Fonts.setFont(u8g2_font_helvB08_tf);
+	u8g2Fonts.setFontDirection(3);
+
+	sprintf(temp, "%d/5", wifiSignal);
+	u8g2Fonts.print(temp);
+
+	display.drawLine(0, 20, 297, 20, GxEPD_BLACK);
 }
 
 void drawForecast()
 {
-	uint8_t vert_pos=16;
-	time_t now = dstAdjusted.time(nullptr);
-	struct tm * timeinfo = localtime(&now);
+	uint8_t vert_pos=28;
+	uint8_t needPrintRain = 0;
+	String printText;
+	char temp[6];
 
-	unsigned int curHour = timeinfo->tm_hour;
-	if (timeinfo->tm_min > 29) curHour = hourAddWrap(curHour, 1);
+	//forecasts[2].rain = 0.3;
 
 	for (int _forecast = 0; _forecast < MAX_FORECASTS; _forecast++)
 	{
-		time_t observation = forecasts[_forecast].observationTime + dstOffset;
-		struct tm* observationTm = localtime(&observation);
+		if (forecasts[_forecast].rain > 0)
+		{
+			needPrintRain = 1;
+			vert_pos = 16;
+		}
+	}
 
-		display.setCursor((_forecast) * 80, 32+ vert_pos);
-		display.setFont(&FreeSansBold9pt7b);
-		display.print(String(observationTm->tm_hour) + ":00");
+	for (int _forecast = 0; _forecast < MAX_FORECASTS; _forecast++)
+	{
+		//int xx = ((_forecast + 1) * 74) - 37;	
+		//display.drawLine(xx, 0, xx, 128, GxEPD_BLACK);
 
-		display.setCursor((_forecast)* 80, 64+16+ vert_pos);
+		u8g2Fonts.setFontDirection(0);
+
+		//print forecast time
+		time_t forecastTtime = forecasts[_forecast].observationTime;
+		struct tm * timeinfo = localtime(&forecastTtime);
+		//printText = String(timeinfo->tm_hour);
+		sprintf(temp, "%02d", timeinfo->tm_hour);
+
+		u8g2Fonts.setFont(u8g2_font_logisoso20_tr);
+		int16_t tw =u8g2Fonts.getUTF8Width(temp);
+		u8g2Fonts.setCursor(((_forecast+1) * 74)-37-tw/2, 32 + vert_pos);	
+		u8g2Fonts.print(temp);
+
+		//ptiny icon
 		display.setFont(&meteocons24pt7b);
+		int16_t x1, y1;
+		uint16_t w, h;
+		display.getTextBounds(forecasts[_forecast].iconMeteoCon, 0, 0,&x1, &y1, &w, &h);
+		//display.setCursor((_forecast) * 80, 64 + 16 + vert_pos);
+		if (w < 24) w=40;
+		display.setCursor( ((_forecast + 1) * 74) - 37 - w / 2, 64 + 16 + vert_pos);
 		display.print(forecasts[_forecast].iconMeteoCon);	
-
-		display.setCursor((_forecast) * 80 + 5, 64 + 16+ 20+ vert_pos);
-		display.setFont(&FreeSansBold9pt7b);
-		display.print(String(forecasts[_forecast].rain*100,0)+ "%");
+		
+		//print rain qty
+		if (forecasts[_forecast].rain > 0 && needPrintRain)
+		{
+			printText = String(forecasts[_forecast].rain, 1) + "mm";
+			u8g2Fonts.setFont(u8g2_font_helvB12_tf);
+			int16_t tw = u8g2Fonts.getUTF8Width(printText.c_str());
+			u8g2Fonts.setCursor(((_forecast + 1) * 74) - 37 - tw / 2, 64 + 16 + 24 + vert_pos);
+			u8g2Fonts.print(printText);
+		}
 	}
 }
 
@@ -205,11 +231,10 @@ unsigned int hourAddWrap(unsigned int hour, unsigned int add) {
 // Update the internet based information and update screen
 uint8_t updateData() 
 {
-	configTime(UTC_OFFSET * 3600, 0, NTP_SERVERS);
+	//request OWM data
 	OpenWeatherMapCurrent *conditionsClient = new OpenWeatherMapCurrent();
 	conditionsClient->setLanguage(OPEN_WEATHER_MAP_LANGUAGE);
 	conditionsClient->setMetric(IS_METRIC);
-	Serial.println("\nAbout to call OpenWeatherMap to fetch station's current data...");
 	conditionsClient->updateCurrentById(&conditions, OPEN_WEATHER_MAP_APP_ID, OPEN_WEATHER_MAP_LOCATION_ID);
 	delete conditionsClient;
 	conditionsClient = nullptr;
@@ -221,24 +246,37 @@ uint8_t updateData()
 	delete forecastsClient;
 	forecastsClient = nullptr;
 
-	// Wait max. 3 seconds to make sure the time has been sync'ed
-	Serial.println("\nWaiting for time");
-	time_t now;
-	uint32_t startTime = millis();
-	uint16_t ntpTimeoutMillis = NTP_SYNC_TIMEOUT_SECONDS * 1000;
-	while ((now = time(nullptr)) < NTP_MIN_VALID_EPOCH) {
-		uint32_t runtimeMillis = millis() - startTime;
-		if (runtimeMillis > ntpTimeoutMillis) {
-			Serial.printf("\nFailed to sync time through NTP. Giving up after %dms.\n", runtimeMillis);
-			return 0;
-			break;
-		}
-		Serial.println(".");
-		delay(300);
-	}
+	Serial.print("observationTime=");
+	Serial.println(conditions.observationTime);
+	Serial.print("timeZone=");
+	Serial.println(conditions.timeZone);
 
-	dstOffset = UTC_OFFSET * 3600 + dstAdjusted.time(nullptr) - now;
-	Serial.printf("Current time: %d\n", now);
-	Serial.printf("UTC offset: %d\n\n", dstOffset);
+	//Set ESP time based on timestamp from observation
+	time_t rtc = conditions.observationTime;
+	timeval tv = { rtc, 0 };
+	timezone tz = { UTC_OFFSET, 0 };
+	settimeofday(&tv, &tz);
+
+	char temp[64];
+	time_t now = time(nullptr);
+	struct tm * timeinfo = localtime(&now);
+	sprintf(temp, "%02d:%02d dst:%d", timeinfo->tm_hour, timeinfo->tm_min, timeinfo->tm_isdst);
+	Serial.println(temp);
+	
 	return 1;
+}
+
+// converts the dBm to a range between 0 and 100%
+int8_t getWifiQuality() {
+	int32_t dbm = WiFi.RSSI();
+	if (dbm > -60) 	return 5;
+	if (dbm > -70) 	return 3;
+	if (dbm > -80) 	return 2;
+	if (dbm > -90) 	return 1;
+	if (dbm <= -90) return 0;
+}
+
+// converts the dBm to a range between 0 and 100%
+int8_t getBatteryLevel(uint16_t v) {
+	return map(v, 2500, 3000, 0, 5);
 }
