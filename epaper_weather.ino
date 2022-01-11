@@ -222,12 +222,6 @@ void drawForecast()
 	}
 }
 
-unsigned int hourAddWrap(unsigned int hour, unsigned int add) {
-	hour += add;
-	if (hour > 23) hour -= 24;
-	return hour;
-}
-
 // Update the internet based information and update screen
 uint8_t updateData() 
 {
